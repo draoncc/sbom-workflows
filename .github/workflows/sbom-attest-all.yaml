@@ -123,10 +123,16 @@ jobs:
           subjects="$(mktemp)"
           # GITHUB_TOKEN cannot list packages, only look them up by name
           # (docs/adr/0001-name-images-explicitly.md). Named Images must exist
-          # and be linked to $REPO; the default name may be absent.
+          # and be linked to $REPO, or carry its source label where the link
+          # is hidden; the default name may be absent.
           explicit=false; names="${REPO#*/}"
           if [[ "$IMAGES" =~ [^[:space:]] ]]; then explicit=true; names="$IMAGES"; fi
+          repo_url="https://github.com/${REPO,,}"
           packages=()
+          # The package API hides .repository from GITHUB_TOKEN; such Images
+          # are checked per Subject digest by source label instead
+          # (docs/adr/0002-check-source-label-when-link-is-hidden.md).
+          declare -A link_hidden=() registry_tokens=()
           while read -r name; do
             [ -z "$name" ] && continue
             name="${name,,}"
@@ -138,7 +144,11 @@ jobs:
             problem=""
             if linked="$(gh api "$base/packages/container/${name//\//%2F}" \
               --jq '.repository.full_name // ""' 2>"$err" </dev/null)"; then
-              [ "${linked,,}" = "${REPO,,}" ] || problem="is linked to '${linked:-no repository}', not $REPO"
+              if [ -z "$linked" ]; then
+                link_hidden[$name]=true
+              elif [ "${linked,,}" != "${REPO,,}" ]; then
+                problem="is linked to '$linked', not $REPO"
+              fi
             elif grep -qE 'HTTP (403|404)' "$err"; then
               problem="is not accessible: $(tr '\n' ' ' < "$err")"
             else
@@ -154,7 +164,8 @@ jobs:
               echo "::warning::image ghcr.io/$owner_lc/$name $problem; skipping"
             fi
           done <<< "$names"
-          echo "Found ${#packages[@]} image(s) linked to $REPO"
+          echo "Found ${#packages[@]} image(s) linked to $REPO" \
+            "(${#link_hidden[@]} checked by source label)"
 
           for pkg in "${packages[@]}"; do
             image="ghcr.io/$owner_lc/$pkg"
@@ -165,6 +176,7 @@ jobs:
               echo "::endgroup::"
               continue
             fi
+            registry_tokens[$pkg]="$registry_token"
 
             gh api --paginate "$base/packages/container/${pkg//\//%2F}/versions" \
               --jq '.[] | [.name, (.metadata.container.tags | length > 0)] | @tsv' |
@@ -183,19 +195,64 @@ jobs:
             echo "::endgroup::"
           done
 
+          # Prints a Platform manifest's org.opencontainers.image.source,
+          # lowercased without whitespace or a trailing / or .git: its manifest annotation,
+          # else its config label, else nothing.
+          source_of() { # pkg digest
+            local token="${registry_tokens[$1]}" manifest src
+            manifest="$(curl -fsS -H "Authorization: Bearer $token" -H "Accept: $accept" \
+              "https://ghcr.io/v2/$owner_lc/$1/manifests/$2")" || return 1
+            src="$(jq -r '.annotations["org.opencontainers.image.source"] // empty' <<< "$manifest")"
+            if [ -z "$src" ]; then
+              src="$(curl -fsSL -H "Authorization: Bearer $token" \
+                "https://ghcr.io/v2/$owner_lc/$1/blobs/$(jq -r .config.digest <<< "$manifest")" |
+                jq -r '.config.Labels["org.opencontainers.image.source"] // empty')" || return 1
+            fi
+            src="${src//[[:space:]]/}"; src="${src,,}"; src="${src%/}"
+            printf '%s\n' "${src%.git}"
+          }
+
           # A Platform manifest reached via several versions is checked once.
-          missing="$(mktemp)"
+          # Workflow commands go to fd 3, since stdout is the missing list.
+          exec 3>&1
+          missing="$(mktemp)" source_checks="$(mktemp)"
           awk -F'\t' '!seen[$1 FS $2]++' "$subjects" |
           while IFS=$'\t' read -r image subject _; do
             spdx=false; cdx=false
             has_attestation "$subject" "${spdx_types[@]}" || spdx=true
             has_attestation "$subject" "${cdx_types[@]}" || cdx=true
-            if [ "$spdx" = true ] || [ "$cdx" = true ]; then
-              jq -cn --arg image "$image" --arg digest "$subject" \
-                --argjson spdx "$spdx" --argjson cyclonedx "$cdx" \
-                '{image: $image, digest: $digest, spdx: $spdx, cyclonedx: $cyclonedx}'
+            if [ "$spdx" = false ] && [ "$cdx" = false ]; then continue; fi
+            pkg="${image#ghcr.io/"$owner_lc"/}"
+            if [ -n "${link_hidden[$pkg]:-}" ]; then
+              if ! src="$(source_of "$pkg" "$subject")"; then
+                echo "::warning::cannot read source label of $image@$subject; skipping" >&3
+                printf '%s\tunreadable\n' "$pkg" >> "$source_checks"
+                continue
+              fi
+              if [ "$src" != "$repo_url" ]; then
+                echo "::warning::$image@$subject has source '${src:-none}', not $repo_url; skipping" >&3
+                printf '%s\tmismatch\n' "$pkg" >> "$source_checks"
+                continue
+              fi
+              printf '%s\tmatch\n' "$pkg" >> "$source_checks"
             fi
+            jq -cn --arg image "$image" --arg digest "$subject" \
+              --argjson spdx "$spdx" --argjson cyclonedx "$cdx" \
+              '{image: $image, digest: $digest, spdx: $spdx, cyclonedx: $cyclonedx}'
           done > "$missing"
+
+          # A named Image none of whose checked Platform manifests has a source
+          # label naming $REPO is treated as linked elsewhere.
+          if [ "$explicit" = true ]; then
+            unlinked="$(awk -F'\t' '$2 == "match" {ok[$1] = 1} {all[$1] = 1}
+              END {for (p in all) if (!(p in ok)) print p}' "$source_checks")"
+            if [ -n "$unlinked" ]; then
+              while read -r pkg; do
+                echo "::error::image ghcr.io/$owner_lc/$pkg has no Platform manifest with source $repo_url"
+              done <<< "$unlinked"
+              exit 1
+            fi
+          fi
 
           total="$(wc -l < "$missing")"
           matrix="$(head -n "$limit" "$missing" | jq -cs .)"

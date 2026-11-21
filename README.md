@@ -37,7 +37,7 @@ The caller must grant at least the permissions above; a reusable workflow cannot
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `images` | repo name | Newline-separated Image names under the owner (`ghcr.io/<owner>/<name>`). Each must be linked to the calling repo; a named Image that is missing or linked elsewhere fails the run, a missing default only warns |
+| `images` | repo name | Newline-separated Image names under the owner (`ghcr.io/<owner>/<name>`). Each must be linked to the calling repo; a named Image that is missing or linked elsewhere fails the run, a missing default only warns. If the token cannot see the link (`GITHUB_TOKEN`), each Platform manifest is attested only if its `org.opencontainers.image.source` label is the calling repo ([ADR 0002](docs/adr/0002-check-source-label-when-link-is-hidden.md)) |
 | `include-untagged` | `false` | Also attest untagged image versions |
 | `dry-run` | `false` | Only report missing attestations in the job summary |
 | `max-digests` | `256` | Max subject digests attested per run (capped at 256); the rest wait for the next run |
