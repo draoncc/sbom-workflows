@@ -306,9 +306,13 @@ class Log:
         self.warnings = 0
         self.failed = False
 
-    def warn(self, message: str) -> None:
+    def warning(self, message: str) -> None:
         self.warnings += 1
         print(f"warning: {message}", file=self.stderr)
+
+    def scoped(self, context: str) -> Callable[[str], None]:
+        """A warning callback that prefixes each message with context."""
+        return lambda message: self.warning(f"{context}: {message}")
 
     def error(self, message: str) -> None:
         self.failed = True
@@ -341,9 +345,9 @@ def render_roots(
         # A source not rendered here is the one azurerm_kubernetes_flux_configuration created: this repository.
         source = sources.get(source_key)
         if source is not None and (source["kind"] != "GitRepository" or git_url_key(source["spec"]["url"]) != origin):
-            log.warn(f"{context}: source {source_key.namespace}/{source_key.name} is not this repository, skipped")
+            log.warning(f"{context}: source {source_key.namespace}/{source_key.name} is not this repository, skipped")
         elif not (checkout / path).is_dir():
-            log.warn(f"{context}: path {path} not in checkout")
+            log.warning(f"{context}: path {path} not in checkout")
         elif path not in seen:
             seen.add(path)
             pending.append((path, spec.get("targetNamespace")))
@@ -673,10 +677,10 @@ def map_images(
             context = f"{root}: {release.ref}"
             try:
                 chart = charts.fetch(release, sources)
-                values = release.values(docs, lambda message: log.warn(f"{context}: {message}"))
+                values = release.values(docs, log.scoped(context))
                 templated = release.template(chart, values, kube_version)
             except (FetchError, ToolError) as error:
-                log.warn(f"{context}: not rendered: {error}")
+                log.warning(f"{context}: not rendered: {error}")
                 rows.append(Row(None, root, release.ref, None, "helm-unrendered", chart=release.chart))
                 continue
             for workload, image, source in extract_images(templated, "helm"):
@@ -738,7 +742,7 @@ def resolve_digests(rows: list[Row], registry: DigestResolver, log: Log) -> dict
         try:
             lookups[row.image] = registry.resolve(row.image)
         except DigestError as error:
-            log.warn(f"digest lookup failed: {error}")
+            log.warning(f"digest lookup failed: {error}")
             lookups[row.image] = (None, None)
     return lookups
 

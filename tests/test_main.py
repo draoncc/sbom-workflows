@@ -121,7 +121,7 @@ def test_unresolved_variables_are_kept_literally_and_duplicates_collapse(fixture
 def test_vars_file_substitutes_known_variables_and_defaults(fixtures):
     argv = [str(fixtures / "vars"), "--vars", str(fixtures / "vars" / "vars.env")]
 
-    code, rows, _ = run(argv)
+    _, rows, _ = run(argv)
 
     assert [(row["image"], row["unresolved"]) for row in rows] == [
         ("ghcr.io/org/app:${TAG}", True),
