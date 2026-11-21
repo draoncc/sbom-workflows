@@ -21,7 +21,7 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 
 Keep history linear. Never create merge commits.
 
-- Update a branch with `git rebase main`, not `git merge main`
+- Update a branch with `git fetch && git rebase origin/main`, not `git merge main`; local `main` may be stale, and worktrees branch from `origin/main`
 - Pull with `git pull --rebase`
 - Integrate branches by rebase + fast-forward (`git merge --ff-only`) or squash/rebase-merge on the PR, never a merge commit
 - Clean up WIP commits with `git rebase` (`--autosquash` with `fixup!` commits) before integrating; interactive `-i` is unavailable to agents
