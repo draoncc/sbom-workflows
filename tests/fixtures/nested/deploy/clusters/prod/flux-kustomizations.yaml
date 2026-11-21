@@ -1,3 +1,11 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: other-repo
+  namespace: flux-system
+spec:
+  url: https://github.com/example/other.git
+---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
@@ -14,7 +22,26 @@ metadata:
   namespace: flux-system
 spec:
   path: ./shared/redis
+  targetNamespace: cache
   sourceRef: {kind: GitRepository, name: flux-system}
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: plain
+  namespace: flux-system
+spec:
+  path: ./shared/plain-dir
+  sourceRef: {kind: GitRepository, name: flux-system}
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: foreign
+  namespace: flux-system
+spec:
+  path: ./shared/foreign
+  sourceRef: {kind: GitRepository, name: other-repo}
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
@@ -23,4 +50,4 @@ metadata:
   namespace: flux-system
 spec:
   path: ./not/in/this/repo
-  sourceRef: {kind: GitRepository, name: other-repo}
+  sourceRef: {kind: GitRepository, name: flux-system}

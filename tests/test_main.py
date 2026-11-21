@@ -109,18 +109,18 @@ def test_unresolved_variables_are_kept_literally_and_duplicates_collapse(fixture
     assert code == 0
     assert [(row["image"], row["unresolved"]) for row in rows] == [
         ("${REGISTRY}/app:${TAG}", True),
-        ("${REGISTRY}/proxy:${PROXY_TAG:=1.0}", True),
+        ("${PROXY_REGISTRY:=docker.io/org}/proxy:${PROXY_TAG:=1.0}", True),
     ]
 
 
-def test_vars_file_substitutes_known_variables(fixtures):
+def test_vars_file_substitutes_known_variables_and_defaults(fixtures):
     argv = [str(fixtures / "vars"), "--vars", str(fixtures / "vars" / "vars.env")]
 
     code, rows, _ = run(argv)
 
     assert [(row["image"], row["unresolved"]) for row in rows] == [
         ("ghcr.io/org/app:${TAG}", True),
-        ("ghcr.io/org/proxy:2.1", False),
+        ("docker.io/org/proxy:2.1", False),
     ]
     assert run([*argv, "--strict"])[0] == 1
 
@@ -129,11 +129,50 @@ def test_follows_local_paths_of_rendered_flux_kustomizations(fixtures):
     code, rows, err = run([str(fixtures / "nested")])
 
     assert code == 0
-    assert [(row["root"], row["image"]) for row in rows] == [
-        ("deploy/apps/web", "docker.io/library/nginx:latest"),
-        ("shared/redis", "docker.io/library/redis:latest"),
+    assert sorted((row["root"], row["image"], row["controller"]["namespace"]) for row in rows) == [
+        ("deploy/apps/web", "docker.io/library/nginx:latest", "apps"),
+        ("shared/plain-dir", "docker.io/library/alpine:latest", "apps"),
+        ("shared/redis", "docker.io/library/redis:latest", "cache"),
     ]
     assert "flux-system/elsewhere" in err
+    assert "flux-system/foreign" in err
+
+
+def test_given_roots_are_normalized_before_deduping(fixtures):
+    _, rows, _ = run([str(fixtures / "nested"), "--root", "./deploy/apps/web/", "--root", "deploy/clusters/prod"])
+
+    assert sorted(row["root"] for row in rows) == ["deploy/apps/web", "shared/plain-dir", "shared/redis"]
+
+
+def test_missing_kustomize_binary_fails_the_root_without_crashing(fixtures, monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    code, rows, err = run([str(fixtures / "plain")])
+
+    assert (code, rows) == (1, [])
+    assert "deploy/app" in err
+
+
+def test_values_files_and_post_renderer_images_apply(fixtures, tmp_path):
+    checkout = tmp_path / "checkout"
+    shutil.copytree(fixtures / "helm", checkout)
+    release = checkout / "deploy/apps/podinfo/helmrelease.yaml"
+    release.write_text(
+        release.read_text().replace("      version: 6.x\n", "      version: 6.x\n      valuesFiles: [values.yaml, values-mirror.yaml]\n")
+        + """  postRenderers:
+    - kustomize:
+        images:
+          - name: ghcr.io/org/podinfo-mirror
+            newTag: 6.7.1
+          - name: busybox
+            newName: mirror.gcr.io/library/busybox
+"""
+    )
+
+    code, rows, _ = run([str(checkout)], charts=FakeCharts(fixtures / "charts"))
+
+    assert code == 0
+    assert [row["image"] for row in rows] == ["ghcr.io/org/podinfo-mirror:6.7.1", "mirror.gcr.io/library/busybox:1.36"]
 
 
 INDEX = "sha256:" + "1" * 64
@@ -179,12 +218,12 @@ def test_failed_digest_lookup_warns_and_leaves_digest_null(fixtures):
     code, rows, err = run(argv, registry=registry)
 
     assert code == 0
-    assert registry.lookups == ["ghcr.io/org/proxy:2.1"]
+    assert registry.lookups == ["docker.io/org/proxy:2.1"]
     assert [(row["image"], row["digest"], row["platforms"]) for row in rows] == [
         ("ghcr.io/org/app:${TAG}", None, None),
-        ("ghcr.io/org/proxy:2.1", None, None),
+        ("docker.io/org/proxy:2.1", None, None),
     ]
-    assert "ghcr.io/org/proxy:2.1: not found" in err
+    assert "docker.io/org/proxy:2.1: not found" in err
 
 
 def test_table_format_lists_one_line_per_row(fixtures):

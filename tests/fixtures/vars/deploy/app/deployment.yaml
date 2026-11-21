@@ -17,4 +17,4 @@ spec:
         - name: app
           image: ${REGISTRY}/app:${TAG}
         - name: proxy
-          image: ${REGISTRY}/proxy:${PROXY_TAG:=1.0}
+          image: ${PROXY_REGISTRY:=docker.io/org}/proxy:${PROXY_TAG:=1.0}

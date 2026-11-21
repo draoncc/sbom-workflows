@@ -156,7 +156,20 @@ def discover_roots(checkout: Path, deploy_dir: str) -> list[str]:
     return sorted(str(directory.relative_to(checkout.resolve())) for directory in dirs - referenced)
 
 
-VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?[=-][^}]*)?\}")
+class ToolError(Exception):
+    """An external tool is missing or failed."""
+
+
+def run_tool(*command: str, cwd: Path | None = None) -> str:
+    try:
+        return subprocess.run(command, capture_output=True, text=True, check=True, cwd=cwd).stdout
+    except FileNotFoundError as error:
+        raise ToolError(f"{command[0]} not found on PATH") from error
+    except subprocess.CalledProcessError as error:
+        raise ToolError(f"{' '.join(command[:2])}: {error.stderr.strip()}") from error
+
+
+VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?[=-]([^}]*))?\}")
 
 
 def load_vars(path: Path) -> dict[str, str]:
@@ -165,14 +178,52 @@ def load_vars(path: Path) -> dict[str, str]:
     return {key.strip(): value.strip().strip("\"'") for key, value in pairs}
 
 
-def substitute(text: str, variables: dict[str, str]) -> str:
-    """Replace known ${VAR} references; unknown ones stay literal, as postBuild values are not available."""
-    return VARIABLE.sub(lambda m: variables.get(m[1], m[0]), text)
+def substitute(text: str, variables: dict[str, str] | None) -> str:
+    """Replace ${VAR} references from variables, falling back to ${VAR:=default} defaults.
+
+    Without variables, postBuild values are unknown, so every reference stays literal.
+    """
+    if variables is None:
+        return text
+
+    def replace(match: re.Match[str]) -> str:
+        if match[1] in variables:
+            return variables[match[1]]
+        return match[2] if match[2] is not None else match[0]
+
+    return VARIABLE.sub(replace, text)
 
 
-def kustomize_build(path: Path, variables: dict[str, str]) -> list[Doc]:
-    out = subprocess.run(["kustomize", "build", str(path)], capture_output=True, text=True, check=True).stdout
+KUSTOMIZATION_FILES = ("kustomization.yaml", "kustomization.yml", "Kustomization")
+
+
+def kustomize_build(path: Path, variables: dict[str, str] | None) -> list[Doc]:
+    if any((path / name).is_file() for name in KUSTOMIZATION_FILES):
+        out = run_tool("kustomize", "build", str(path))
+    else:
+        # Flux generates a kustomization for plain directories; do the same on a copy.
+        with tempfile.TemporaryDirectory(prefix="image-map-") as workdir:
+            copy = Path(workdir) / path.name
+            shutil.copytree(path, copy)
+            run_tool("kustomize", "create", "--autodetect", "--recursive", cwd=copy)
+            out = run_tool("kustomize", "build", str(copy))
     return [doc for doc in yaml.safe_load_all(substitute(out, variables)) if doc]
+
+
+CLUSTER_SCOPED = {
+    "Namespace", "Node", "PersistentVolume", "StorageClass", "PriorityClass", "RuntimeClass",
+    "ClusterRole", "ClusterRoleBinding", "CustomResourceDefinition", "APIService", "IngressClass",
+    "MutatingWebhookConfiguration", "ValidatingWebhookConfiguration", "ValidatingAdmissionPolicy",
+    "ValidatingAdmissionPolicyBinding", "CSIDriver", "VolumeSnapshotClass", "ClusterIssuer",
+}
+
+
+def set_namespace(docs: list[Doc], namespace: str) -> list[Doc]:
+    """Apply a Flux Kustomization's targetNamespace to every namespaced object."""
+    for doc in docs:
+        if doc.get("kind") not in CLUSTER_SCOPED:
+            doc.setdefault("metadata", {})["namespace"] = namespace
+    return docs
 
 
 SourceKey = tuple[str, str | None, str]
@@ -236,14 +287,30 @@ def helm_template(chart: Path, release: Doc, values: Doc, kube_version: str | No
         yaml.safe_dump(values, values_file)
         values_file.flush()
         command = ["helm", "template", name, str(chart), "--namespace", namespace, "--include-crds"]
+        chart_spec = (spec.get("chart") or {}).get("spec") or {}
+        for values_path in chart_spec.get("valuesFiles") or []:
+            command += ["--values", str(chart / values_path)]
         command += ["--values", values_file.name]
         if kube_version:
             command += ["--kube-version", kube_version]
-        out = subprocess.run(command, capture_output=True, text=True, check=True).stdout
+        out = run_tool(*command)
     docs = [doc for doc in yaml.safe_load_all(out) if doc]
     if not (spec.get("test") or {}).get("enable"):
         docs = [doc for doc in docs if not is_test_hook(doc)]
+    for renderer in spec.get("postRenderers") or []:
+        if kustomize := renderer.get("kustomize"):
+            docs = post_render(docs, kustomize)
     return docs, namespace
+
+
+def post_render(docs: list[Doc], kustomize: Doc) -> list[Doc]:
+    """Apply a HelmRelease kustomize post-renderer (images, patches) to rendered manifests."""
+    with tempfile.TemporaryDirectory(prefix="image-map-") as workdir:
+        Path(workdir, "rendered.yaml").write_text(yaml.safe_dump_all(docs))
+        kustomization = {"resources": ["rendered.yaml"], **kustomize}
+        Path(workdir, "kustomization.yaml").write_text(yaml.safe_dump(kustomization))
+        out = run_tool("kustomize", "build", workdir)
+    return [doc for doc in yaml.safe_load_all(out) if doc]
 
 
 def is_test_hook(doc: Doc) -> bool:
@@ -273,9 +340,9 @@ class Crane:
 
     def run(self, *args: str) -> str:
         try:
-            return subprocess.run(["crane", *args], capture_output=True, text=True, check=True).stdout.strip()
-        except subprocess.CalledProcessError as error:
-            raise DigestError(f"{args[-1]}: {error.stderr.strip()}") from error
+            return run_tool("crane", *args).strip()
+        except ToolError as error:
+            raise DigestError(f"{args[-1]}: {error}") from error
 
     def resolve(self, image: str) -> tuple[str, Platforms]:
         name, _, digest = image.partition("@")
@@ -283,7 +350,10 @@ class Crane:
             name = name.rsplit(":", 1)[0] if ":" in name.rsplit("/", 1)[-1] else name
         else:
             digest = self.run("digest", image)
-        manifest = json.loads(self.run("manifest", f"{name}@{digest}"))
+        try:
+            manifest = json.loads(self.run("manifest", f"{name}@{digest}"))
+        except json.JSONDecodeError as error:
+            raise DigestError(f"{image}: unreadable manifest: {error}") from error
         if manifest.get("mediaType") not in INDEX_TYPES:
             return digest, None
         platforms = []
@@ -302,7 +372,8 @@ def print_table(rows: list[Doc], stdout: TextIO) -> None:
 
     lines = [("IMAGE", "CONTROLLER", "WORKLOAD", "SOURCE", "ROOT")]
     for row in rows:
-        image = row["image"] or "{name}@{version}".format(**row["chart"])
+        chart = row.get("chart") or {}
+        image = row["image"] or "@".join(str(part) for part in (chart.get("name"), chart.get("version")) if part)
         lines.append((image, name(row["controller"]), name(row["workload"]), row["source"], row["root"]))
     widths = [max(len(line[i]) for line in lines) for i in range(len(lines[0]))]
     for line in lines:
@@ -328,9 +399,10 @@ def main(
     args = parser.parse_args(argv)
 
     checkout: Path = args.checkout.resolve()
-    charts = charts or RemoteCharts(checkout)
+    origin = git_origin(checkout)
+    charts = charts or RemoteCharts(checkout, origin)
     registry = registry or Crane()
-    variables = load_vars(args.vars) if args.vars else {}
+    variables = load_vars(args.vars) if args.vars else None
     warnings = 0
     failed = False
 
@@ -340,32 +412,49 @@ def main(
         print(f"warning: {message}", file=stderr)
 
     built: dict[str, list[Doc]] = {}
-    pending = list(args.root or discover_roots(checkout, args.deploy_dir))
-    seen = set(pending)
-    while pending:
-        root = pending.pop(0)
-        try:
-            built[root] = kustomize_build(checkout / root, variables)
-        except subprocess.CalledProcessError as error:
-            failed = True
-            print(f"error: {root}: kustomize build failed: {error.stderr.strip()}", file=stderr)
-            continue
-        for flux in built[root]:
-            if flux.get("kind") != "Kustomization" or not str(flux.get("apiVersion")).startswith("kustomize.toolkit"):
-                continue
-            path = os.path.normpath((flux.get("spec") or {}).get("path") or ".")
-            if not (checkout / path).is_dir():
-                warn(f"{root}: Kustomization {ref(flux)['namespace']}/{ref(flux)['name']}: path {path} not in checkout")
+    sources: dict[SourceKey, Doc] = {}
+    pending: list[tuple[str, str | None]] = [
+        (os.path.normpath(root), None) for root in args.root or discover_roots(checkout, args.deploy_dir)
+    ]
+    seen = {root for root, _ in pending}
+    flux_kustomizations: list[tuple[str, Doc]] = []
+    # Build every known root before following Flux Kustomizations, so their sources are all indexed.
+    while pending or flux_kustomizations:
+        if not pending:
+            root, flux = flux_kustomizations.pop(0)
+            spec = flux.get("spec") or {}
+            where = f"{root}: Kustomization {ref(flux)['namespace']}/{ref(flux)['name']}"
+            source_ref = spec.get("sourceRef") or {}
+            source_key = (
+                source_ref.get("kind", "GitRepository"),
+                source_ref.get("namespace", ref(flux)["namespace"]),
+                str(source_ref.get("name")),
+            )
+            path = os.path.normpath(spec.get("path") or ".")
+            if (source := sources.get(source_key)) is not None and (
+                source.get("kind") != "GitRepository" or git_url_key(source["spec"]["url"]) != origin
+            ):
+                warn(f"{where}: source {source_key[1]}/{source_key[2]} is not this repository, skipped")
+            elif not (checkout / path).is_dir():
+                warn(f"{where}: path {path} not in checkout")
             elif path not in seen:
                 seen.add(path)
-                pending.append(path)
-
-    sources: dict[SourceKey, Doc] = {
-        (doc["kind"], ref(doc)["namespace"], str(ref(doc)["name"])): doc
-        for docs in built.values()
-        for doc in docs
-        if str(doc.get("apiVersion", "")).startswith("source.toolkit.fluxcd.io/")
-    }
+                pending.append((path, spec.get("targetNamespace")))
+            continue
+        root, target_namespace = pending.pop(0)
+        try:
+            docs = kustomize_build(checkout / root, variables)
+        except ToolError as error:
+            failed = True
+            print(f"error: {root}: kustomize build failed: {error}", file=stderr)
+            continue
+        built[root] = set_namespace(docs, target_namespace) if target_namespace else docs
+        for doc in docs:
+            api_version = str(doc.get("apiVersion", ""))
+            if api_version.startswith("source.toolkit.fluxcd.io/"):
+                sources[(doc["kind"], ref(doc)["namespace"], str(ref(doc)["name"]))] = doc
+            elif api_version.startswith("kustomize.toolkit.fluxcd.io/") and doc.get("kind") == "Kustomization":
+                flux_kustomizations.append((root, doc))
 
     rows: list[Doc] = []
 
@@ -391,12 +480,10 @@ def main(
                 chart = charts.fetch(release, sources)
                 values = release_values(release, docs, lambda message: warn(f"{where}: {message}"))
                 rendered, namespace = helm_template(chart, release, values, args.kube_version)
-            except (FetchError, subprocess.CalledProcessError) as error:
-                detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) else error
-                warn(f"{where}: not rendered: {detail}")
-                chart_spec = (release["spec"].get("chart") or {}).get("spec") or {}
+            except (FetchError, ToolError) as error:
+                warn(f"{where}: not rendered: {error}")
                 row = add(None, root, release, None, "helm-unrendered")
-                row["chart"] = {"name": chart_spec.get("chart"), "version": chart_spec.get("version")}
+                row["chart"] = release_chart(release)
                 continue
             for workload, image, kind in extract_images(rendered):
                 workload_ref = ref(workload)
@@ -433,26 +520,36 @@ def git_url_key(url: str) -> str:
     return url.removesuffix("/").removesuffix(".git").lower()
 
 
+def git_origin(checkout: Path) -> str | None:
+    try:
+        return git_url_key(run_tool("git", "-C", str(checkout), "remote", "get-url", "origin"))
+    except ToolError:
+        return None
+
+
+def release_chart(release: Doc) -> dict[str, str | None]:
+    """What a HelmRelease deploys, for rows whose chart could not be rendered."""
+    spec = release.get("spec") or {}
+    if chart_ref := spec.get("chartRef"):
+        return {"name": f"{chart_ref.get('kind')}/{chart_ref.get('name')}", "version": None}
+    chart = (spec.get("chart") or {}).get("spec") or {}
+    return {"name": chart.get("chart"), "version": chart.get("version")}
+
+
 class RemoteCharts:
     """Fetches charts from Flux sources using ambient helm, docker and git credentials."""
 
-    def __init__(self, checkout: Path) -> None:
+    def __init__(self, checkout: Path, origin: str | None) -> None:
         self.checkout = checkout
+        self.origin = origin
         self.workdir = tempfile.TemporaryDirectory(prefix="image-map-")
         self.cache: dict[tuple[str, ...], Path] = {}
-        try:
-            origin = subprocess.run(
-                ["git", "-C", str(checkout), "remote", "get-url", "origin"], capture_output=True, text=True, check=True
-            ).stdout
-            self.origin: str | None = git_url_key(origin)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            self.origin = None
 
     def run(self, *command: str) -> str:
         try:
-            return subprocess.run(command, capture_output=True, text=True, check=True).stdout
-        except subprocess.CalledProcessError as error:
-            raise FetchError(f"{' '.join(command[:2])}: {error.stderr.strip()}") from error
+            return run_tool(*command)
+        except ToolError as error:
+            raise FetchError(str(error)) from error
 
     def source(self, sources: dict[SourceKey, Doc], kind: str, namespace: str | None, name: str) -> Doc:
         if (found := sources.get((kind, namespace, name))) is None:
@@ -460,6 +557,12 @@ class RemoteCharts:
         return found
 
     def fetch(self, release: Doc, sources: dict[SourceKey, Doc]) -> Path:
+        try:
+            return self.fetch_chart(release, sources)
+        except (KeyError, TypeError) as error:
+            raise FetchError(f"malformed chart reference: {error!r}") from error
+
+    def fetch_chart(self, release: Doc, sources: dict[SourceKey, Doc]) -> Path:
         namespace = ref(release)["namespace"]
         spec = release["spec"]
         if chart_ref := spec.get("chartRef"):
@@ -525,11 +628,14 @@ class RemoteCharts:
         if not path.is_dir():
             raise FetchError(f"chart path {chart} not found in {url}")
         if (yaml.safe_load((path / "Chart.yaml").read_text()) or {}).get("dependencies"):
-            # Build dependencies on a copy, so the checkout is left untouched.
-            copy = Path(self.workdir.name) / f"deps-{len(self.cache)}" / path.name
-            shutil.copytree(path, copy)
-            self.run("helm", "dependency", "build", str(copy))
-            self.cache[(url, chart, "deps")] = path = copy
+            deps_key = (url, str(root), chart, "deps")
+            if deps_key not in self.cache:
+                # Build dependencies on a copy, so the checkout is left untouched.
+                copy = Path(self.workdir.name) / f"deps-{len(self.cache)}" / path.name
+                shutil.copytree(path, copy)
+                self.run("helm", "dependency", "build", str(copy))
+                self.cache[deps_key] = copy
+            path = self.cache[deps_key]
         return path
 
 
