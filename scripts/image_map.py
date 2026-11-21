@@ -691,6 +691,7 @@ def map_images(
 # Digests
 
 PlatformManifests = list[dict[str, str]] | None
+Digests = dict[str, tuple[str | None, PlatformManifests]]
 
 
 class DigestError(Exception):
@@ -733,9 +734,9 @@ class Crane:
         return digest, platforms
 
 
-def resolve_digests(rows: list[Row], registry: DigestResolver, log: Log) -> dict[str, tuple[str | None, PlatformManifests]]:
+def resolve_digests(rows: list[Row], registry: DigestResolver, log: Log) -> Digests:
     """Digest and Platform manifests per resolvable image reference; failed lookups map to (None, None)."""
-    lookups: dict[str, tuple[str | None, PlatformManifests]] = {}
+    lookups: Digests = {}
     for row in rows:
         if row.image is None or row.unresolved or row.image in lookups:
             continue
@@ -750,22 +751,32 @@ def resolve_digests(rows: list[Row], registry: DigestResolver, log: Log) -> dict
 # Output
 
 
-def print_table(rows: list[Row], stdout: TextIO) -> None:
-    lines = [("IMAGE", "CONTROLLER", "WORKLOAD", "SOURCE", "ROOT")]
+def lookup(digests: Digests, row: Row) -> tuple[str | None, PlatformManifests]:
+    return digests.get(row.image or "", (None, None))
+
+
+def print_table(rows: list[Row], digests: Digests | None, stdout: TextIO) -> None:
+    header = ["IMAGE", "CONTROLLER", "WORKLOAD", "SOURCE", "ROOT"]
+    if digests is not None:
+        header.insert(1, "DIGEST")
+    lines = [header]
     for row in rows:
         image = row.image or (row.chart.label() if row.chart else "-")
         workload = row.workload.label() if row.workload else "-"
-        lines.append((image, row.controller.label(), workload, row.source, row.root))
-    widths = [max(len(line[i]) for line in lines) for i in range(len(lines[0]))]
+        line = [image, row.controller.label(), workload, row.source, row.root]
+        if digests is not None:
+            line.insert(1, lookup(digests, row)[0] or "-")
+        lines.append(line)
+    widths = [max(len(line[i]) for line in lines) for i in range(len(header))]
     for line in lines:
         print("  ".join(cell.ljust(width) for cell, width in zip(line, widths)).rstrip(), file=stdout)
 
 
-def print_jsonl(rows: list[Row], digests: dict[str, tuple[str | None, PlatformManifests]] | None, stdout: TextIO) -> None:
+def print_jsonl(rows: list[Row], digests: Digests | None, stdout: TextIO) -> None:
     for row in rows:
         output = row.to_json()
         if digests is not None:
-            output["digest"], output["platforms"] = digests.get(row.image or "", (None, None))
+            output["digest"], output["platforms"] = lookup(digests, row)
         print(json.dumps(output), file=stdout)
 
 
@@ -801,7 +812,7 @@ def main(
     digests = resolve_digests(rows, registry or Crane(), log) if args.resolve_digests else None
 
     if args.format == "table":
-        print_table(rows, stdout)
+        print_table(rows, digests, stdout)
     else:
         print_jsonl(rows, digests, stdout)
 

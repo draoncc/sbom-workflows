@@ -249,6 +249,34 @@ def test_table_format_lists_one_line_per_row(fixtures):
     ]
 
 
+def test_table_format_shows_resolved_digests_after_image(fixtures):
+    out, err = io.StringIO(), io.StringIO()
+    argv = [str(fixtures / "helm"), "--format", "table", "--resolve-digests"]
+
+    main(argv, stdout=out, stderr=err, charts=FakeCharts(fixtures / "charts"), registry=FakeRegistry())
+
+    lines = [line.split() for line in out.getvalue().splitlines()]
+    assert lines[0][:2] == ["IMAGE", "DIGEST"]
+    assert [line[:2] for line in lines[1:]] == [
+        ["ghcr.io/stefanprodan/podinfo:6.7.0", INDEX],
+        ["docker.io/library/busybox:1.36", SINGLE],
+    ]
+
+
+def test_table_format_shows_dash_for_unresolved_digests(fixtures):
+    out, err = io.StringIO(), io.StringIO()
+    argv = [str(fixtures / "vars"), "--vars", str(fixtures / "vars" / "vars.env"), "--format", "table", "--resolve-digests"]
+
+    main(argv, stdout=out, stderr=err, registry=FakeRegistry())
+
+    lines = [line.split() for line in out.getvalue().splitlines()]
+    assert [line[:2] for line in lines[1:]] == [
+        ["ghcr.io/org/app:${TAG}", "-"],
+        ["docker.io/org/proxy:2.1", "-"],
+        ["ghcr.io/org/escaped:${TAG}", "-"],
+    ]
+
+
 def test_helm_test_hooks_only_count_when_release_enables_tests(fixtures, tmp_path):
     checkout = tmp_path / "checkout"
     shutil.copytree(fixtures / "helm", checkout)
