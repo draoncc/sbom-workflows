@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: activemq
+spec:
+  containers:
+    - name: activemq
+      image: apache/activemq-classic:6.1.0

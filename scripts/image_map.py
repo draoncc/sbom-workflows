@@ -272,11 +272,17 @@ def kustomize_build(path: Path, variables: dict[str, str] | None) -> list[Doc]:
         out = run_tool("kustomize", "build", str(path))
     else:
         # Flux generates a kustomization for plain directories; do the same on a copy.
+        # Point its resources back at the originals, so their relative references still resolve.
         with tempfile.TemporaryDirectory(prefix="image-map-") as workdir:
             copy = Path(workdir) / path.name
             shutil.copytree(path, copy)
             run_tool("kustomize", "create", "--autodetect", "--recursive", cwd=copy)
-            out = run_tool("kustomize", "build", str(copy))
+            kustomization = yaml.safe_load((copy / "kustomization.yaml").read_text())
+            kustomization["resources"] = [
+                os.path.relpath(path.resolve() / resource, copy) for resource in kustomization.get("resources") or []
+            ]
+            (copy / "kustomization.yaml").write_text(yaml.safe_dump(kustomization))
+            out = run_tool("kustomize", "build", "--load-restrictor", "LoadRestrictionsNone", str(copy))
     return [doc for doc in yaml.safe_load_all(substitute(out, variables)) if doc]
 
 

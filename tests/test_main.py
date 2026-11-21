@@ -381,3 +381,12 @@ def test_git_repository_charts_are_cloned_at_flux_ref(chart_repo, tmp_path, git_
 
     assert code == 0, err
     assert [row["image"] for row in rows] == [f"ghcr.io/stefanprodan/podinfo:{expected_tag}"]
+
+
+def test_plain_root_resolves_relative_refs_of_its_kustomizations(fixtures):
+    code, rows, err = run([str(fixtures / "overlays"), "--root", "deploy/dev"])
+
+    assert code == 0, err
+    assert [(row["root"], row["image"], row["controller"]["namespace"]) for row in rows] == [
+        ("deploy/dev", "docker.io/apache/activemq-classic:6.1.0", "dev"),
+    ]
