@@ -5,11 +5,11 @@ Reusable automation that ensures every container image a repository publishes ca
 ## Language
 
 **Image**:
-A container package in a registry, owned by a user or org and linked to one Linked repository.
+A container package in any registry, owned by a user or org. An Image in GHCR is linked to one Linked repository; only those get SBOM attestations.
 _Avoid_: Container, package (when meaning the image itself)
 
 **Linked repository**:
-The repository an Image is linked to; SBOM attestations for its Platform manifests are stored there.
+The repository a GHCR Image is linked to; SBOM attestations for its Platform manifests are stored there.
 _Avoid_: Source repo, owning repo
 
 **Image version**:
@@ -42,3 +42,19 @@ _Avoid_: SBOM (when meaning the signed statement), signature
 **Missing attestation**:
 A (Subject digest, SBOM format) pair with no SBOM attestation.
 _Avoid_: Gap, unattested image
+
+**Flux root**:
+A repository path Flux applies directly to a cluster, such as the bootstrap path; everything it deploys is reached from it.
+_Avoid_: Root kustomization, cluster dir
+
+**Controller**:
+The Flux object (Kustomization or HelmRelease) that deploys a Workload.
+_Avoid_: Owner, parent
+
+**Workload**:
+A Kubernetes object that runs one or more Images.
+_Avoid_: App, service
+
+**Substitution variables**:
+KEY=VALUE pairs Flux substitutes into manifests before applying them.
+_Avoid_: Var map, env, postBuild vars
