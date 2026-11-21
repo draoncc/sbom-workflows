@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: apps
+spec:
+  selector:
+    matchLabels: {app: app}
+  template:
+    metadata:
+      labels: {app: app}
+    spec:
+      initContainers:
+        - name: migrate
+          image: ${REGISTRY}/app:${TAG}
+      containers:
+        - name: app
+          image: ${REGISTRY}/app:${TAG}
+        - name: proxy
+          image: ${REGISTRY}/proxy:${PROXY_TAG:=1.0}

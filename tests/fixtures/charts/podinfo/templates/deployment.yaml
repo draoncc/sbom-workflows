@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  selector:
+    matchLabels: {app: podinfo}
+  template:
+    metadata:
+      labels: {app: podinfo}
+    spec:
+      containers:
+        - name: podinfo
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+        {{- with .Values.sidecar.image }}
+        - name: sidecar
+          image: {{ . }}
+        {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-ns
+  namespace: {{ .Release.Namespace }}
+data:
+  namespace: {{ .Release.Namespace }}

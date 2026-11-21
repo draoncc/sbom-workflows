@@ -1,0 +1,23 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: podinfo
+spec:
+  interval: 10m
+  targetNamespace: web
+  chart:
+    spec:
+      chart: podinfo
+      version: 6.x
+      sourceRef:
+        kind: HelmRepository
+        name: podinfo
+        namespace: flux-system
+  valuesFrom:
+    - kind: ConfigMap
+      name: podinfo-values
+    - kind: Secret
+      name: podinfo-secret-values
+  values:
+    image:
+      tag: 6.7.0
