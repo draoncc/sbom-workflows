@@ -99,6 +99,7 @@ jobs:
           # Prints the Platform manifest digests a manifest stands for: its
           # non-unknown children if an Index, itself if an image manifest,
           # nothing for referrers and other artifacts.
+          # shellcheck disable=SC2016 # jq program, $ is jq's
           platform_manifests='
             def is_index: .mediaType == "application/vnd.oci.image.index.v1+json"
               or .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json"

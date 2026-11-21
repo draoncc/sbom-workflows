@@ -11,7 +11,7 @@
     {
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [ uv python3 ruff kustomize kubernetes-helm crane git ];
+          packages = with pkgs; [ uv python3 ruff kustomize kubernetes-helm crane git actionlint shellcheck ];
           env = {
             UV_PYTHON = "${pkgs.python3}/bin/python3";
             UV_PYTHON_DOWNLOADS = "never";

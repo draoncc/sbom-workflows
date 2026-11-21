@@ -1,0 +1,5 @@
+paths:
+  .github/workflows/**/*.yaml:
+    ignore:
+      # Documented job context properties actionlint's schema doesn't know yet.
+      - 'property "workflow_(repository|sha)" is not defined'
