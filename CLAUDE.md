@@ -11,3 +11,7 @@ Default five roles (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-
 ### Domain docs
 
 Single-context: root `GLOSSARY.md` + `docs/adr/`. See `docs/agents/domain.md`.
+
+### Commits and history
+
+Conventional Commits; linear history via rebase, no merge commits. See `docs/agents/contributing.md`.
