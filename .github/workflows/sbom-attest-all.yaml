@@ -167,6 +167,8 @@ jobs:
           echo "Found ${#packages[@]} image(s) linked to $REPO" \
             "(${#link_hidden[@]} checked by source label)"
 
+          # Workflow commands inside loops whose stdout is collected go to fd 3.
+          exec 3>&1
           for pkg in "${packages[@]}"; do
             image="ghcr.io/$owner_lc/$pkg"
             echo "::group::$image"
@@ -184,25 +186,28 @@ jobs:
               if [ "$tagged" != true ] && [ "$INCLUDE_UNTAGGED" != true ]; then continue; fi
               if ! manifest="$(curl -fsS -H "Authorization: Bearer $registry_token" -H "Accept: $accept" \
                 "https://ghcr.io/v2/$owner_lc/$pkg/manifests/$digest")"; then
-                echo "::warning::cannot fetch manifest $image@$digest"
+                echo "::warning::cannot fetch manifest $image@$digest" >&3
                 continue
               fi
+              # Multi-arch Images may carry their source only on the Index.
+              index_source="$(jq -r '.annotations["org.opencontainers.image.source"] // ""' <<< "$manifest")"
               jq -r --arg self "$digest" "$platform_manifests" <<< "$manifest" |
               while read -r subject; do
-                printf '%s\t%s\t%s\n' "$image" "$subject" "$tagged"
+                printf '%s\t%s\t%s\t%s\n' "$image" "$subject" "$tagged" "$index_source"
               done
             done >> "$subjects"
             echo "::endgroup::"
           done
 
           # Prints a Platform manifest's org.opencontainers.image.source,
-          # lowercased without whitespace or a trailing / or .git: its manifest annotation,
-          # else its config label, else nothing.
-          source_of() { # pkg digest
+          # lowercased without whitespace or a trailing / or .git: its manifest
+          # annotation, else its Index's, else its config label, else nothing.
+          source_of() { # pkg digest index-source
             local token="${registry_tokens[$1]}" manifest src
             manifest="$(curl -fsS -H "Authorization: Bearer $token" -H "Accept: $accept" \
               "https://ghcr.io/v2/$owner_lc/$1/manifests/$2")" || return 1
             src="$(jq -r '.annotations["org.opencontainers.image.source"] // empty' <<< "$manifest")"
+            src="${src:-$3}"
             if [ -z "$src" ]; then
               src="$(curl -fsSL -H "Authorization: Bearer $token" \
                 "https://ghcr.io/v2/$owner_lc/$1/blobs/$(jq -r .config.digest <<< "$manifest")" |
@@ -213,18 +218,16 @@ jobs:
           }
 
           # A Platform manifest reached via several versions is checked once.
-          # Workflow commands go to fd 3, since stdout is the missing list.
-          exec 3>&1
           missing="$(mktemp)" source_checks="$(mktemp)"
           awk -F'\t' '!seen[$1 FS $2]++' "$subjects" |
-          while IFS=$'\t' read -r image subject _; do
+          while IFS=$'\t' read -r image subject _ index_source; do
             spdx=false; cdx=false
             has_attestation "$subject" "${spdx_types[@]}" || spdx=true
             has_attestation "$subject" "${cdx_types[@]}" || cdx=true
             if [ "$spdx" = false ] && [ "$cdx" = false ]; then continue; fi
             pkg="${image#ghcr.io/"$owner_lc"/}"
             if [ -n "${link_hidden[$pkg]:-}" ]; then
-              if ! src="$(source_of "$pkg" "$subject")"; then
+              if ! src="$(source_of "$pkg" "$subject" "$index_source")"; then
                 echo "::warning::cannot read source label of $image@$subject; skipping" >&3
                 printf '%s\tunreadable\n' "$pkg" >> "$source_checks"
                 continue
