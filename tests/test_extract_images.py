@@ -10,16 +10,16 @@ def template(spec):
 
 
 def found(docs):
-    return [(doc["kind"], image, source) for doc, image, source in extract_images(docs)]
+    return [(doc["kind"], image, source) for doc, image, source in extract_images(docs, "kustomize")]
 
 
 def test_reads_all_container_lists_of_a_pod():
     spec = {**pod("init", key="initContainers"), **pod("main"), **pod("debug", key="ephemeralContainers")}
 
     assert found([{"kind": "Pod", "spec": spec}]) == [
-        ("Pod", "init", "pod"),
-        ("Pod", "main", "pod"),
-        ("Pod", "debug", "pod"),
+        ("Pod", "init", "kustomize"),
+        ("Pod", "main", "kustomize"),
+        ("Pod", "debug", "kustomize"),
     ]
 
 

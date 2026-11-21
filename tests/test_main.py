@@ -1,6 +1,10 @@
 import io
 import json
 import shutil
+import subprocess
+
+import pytest
+import yaml
 
 import image_map
 from image_map import main
@@ -37,9 +41,9 @@ class FakeCharts:
         self.requests = []
 
     def fetch(self, release, sources):
-        chart = release["spec"]["chart"]["spec"]
+        chart = release.chart_spec
         source_ref = chart["sourceRef"]
-        source = sources.get((source_ref["kind"], source_ref.get("namespace"), source_ref["name"]))
+        source = sources.get(image_map.ObjectRef(source_ref["kind"], source_ref.get("namespace"), source_ref["name"]))
         self.requests.append((chart["chart"], chart.get("version"), source and source["spec"]["url"]))
         path = self.charts_dir / chart["chart"]
         if not path.is_dir():
@@ -110,6 +114,7 @@ def test_unresolved_variables_are_kept_literally_and_duplicates_collapse(fixture
     assert [(row["image"], row["unresolved"]) for row in rows] == [
         ("${REGISTRY}/app:${TAG}", True),
         ("${PROXY_REGISTRY:=docker.io/org}/proxy:${PROXY_TAG:=1.0}", True),
+        ("ghcr.io/org/escaped:${TAG}", False),
     ]
 
 
@@ -121,6 +126,7 @@ def test_vars_file_substitutes_known_variables_and_defaults(fixtures):
     assert [(row["image"], row["unresolved"]) for row in rows] == [
         ("ghcr.io/org/app:${TAG}", True),
         ("docker.io/org/proxy:2.1", False),
+        ("ghcr.io/org/escaped:${TAG}", False),
     ]
     assert run([*argv, "--strict"])[0] == 1
 
@@ -218,10 +224,11 @@ def test_failed_digest_lookup_warns_and_leaves_digest_null(fixtures):
     code, rows, err = run(argv, registry=registry)
 
     assert code == 0
-    assert registry.lookups == ["docker.io/org/proxy:2.1"]
+    assert registry.lookups == ["docker.io/org/proxy:2.1", "ghcr.io/org/escaped:${TAG}"]
     assert [(row["image"], row["digest"], row["platforms"]) for row in rows] == [
         ("ghcr.io/org/app:${TAG}", None, None),
         ("docker.io/org/proxy:2.1", None, None),
+        ("ghcr.io/org/escaped:${TAG}", None, None),
     ]
     assert "docker.io/org/proxy:2.1: not found" in err
 
@@ -255,3 +262,94 @@ def test_helm_test_hooks_only_count_when_release_enables_tests(fixtures, tmp_pat
     assert [row["workload"] for row in with_tests if row["image"] == "docker.io/curlimages/curl:8.0.0"] == [
         {"kind": "Pod", "namespace": "web", "name": "web-podinfo-test"}
     ]
+
+
+def test_long_release_names_are_shortened_like_flux(fixtures, tmp_path):
+    checkout = tmp_path / "checkout"
+    shutil.copytree(fixtures / "helm", checkout)
+    release = checkout / "deploy/apps/podinfo/helmrelease.yaml"
+    long_namespace = "a-very-long-target-namespace-for-release-truncation"
+    release.write_text(release.read_text().replace("targetNamespace: web", f"targetNamespace: {long_namespace}"))
+
+    _, rows, _ = run([str(checkout)], charts=FakeCharts(fixtures / "charts"))
+
+    assert {row["workload"]["name"] for row in rows} == {"a-very-long-target-namespace-for-release-95a9e7aacb4b"}
+
+
+def git(*args, cwd):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+@pytest.fixture
+def chart_repo(fixtures, tmp_path):
+    """A git repository whose podinfo chart image tag names the ref it was committed on."""
+    repo = tmp_path / "charts-repo"
+    shutil.copytree(fixtures / "charts", repo / "charts")
+    git("init", "-q", "-b", "master", cwd=repo)
+    git("config", "user.email", "test@example.com", cwd=repo)
+    git("config", "user.name", "test", cwd=repo)
+    values = repo / "charts/podinfo/values.yaml"
+    commits = {}
+
+    def commit(label):
+        values.write_text(f"image:\n  repository: ghcr.io/stefanprodan/podinfo\n  tag: {label}\nsidecar:\n  image: ''\n")
+        git("add", ".", cwd=repo)
+        git("commit", "-q", "-m", label, cwd=repo)
+        commits[label] = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    commit("pinned-commit")
+    commit("v1.0.0")
+    git("tag", "v1.0.0", cwd=repo)
+    commit("v1.1.0")
+    git("tag", "v1.1.0", cwd=repo)
+    commit("master")
+    git("checkout", "-q", "-b", "main", cwd=repo)
+    commit("main")
+    git("checkout", "-q", "master", cwd=repo)
+    return repo, commits
+
+
+def git_release_checkout(tmp_path, repo, git_ref):
+    checkout = tmp_path / "deploy-repo"
+    (checkout / "deploy/app").mkdir(parents=True)
+    (checkout / "deploy/app/kustomization.yaml").write_text("resources: [release.yaml]\n")
+    source = {
+        "apiVersion": "source.toolkit.fluxcd.io/v1",
+        "kind": "GitRepository",
+        "metadata": {"name": "charts", "namespace": "apps"},
+        "spec": {"url": repo.as_uri(), **({"ref": git_ref} if git_ref else {})},
+    }
+    release = {
+        "apiVersion": "helm.toolkit.fluxcd.io/v2",
+        "kind": "HelmRelease",
+        "metadata": {"name": "podinfo", "namespace": "apps"},
+        "spec": {"chart": {"spec": {"chart": "charts/podinfo", "sourceRef": {"kind": "GitRepository", "name": "charts"}}}},
+    }
+    (checkout / "deploy/app/release.yaml").write_text(yaml.safe_dump_all([source, release]))
+    return checkout
+
+
+@pytest.mark.parametrize(
+    ("git_ref", "expected_tag"),
+    [
+        (None, "master"),
+        ({"branch": "main"}, "main"),
+        ({"tag": "v1.0.0"}, "v1.0.0"),
+        ({"semver": "1.x"}, "v1.1.0"),
+        ({"name": "refs/tags/v1.0.0"}, "v1.0.0"),
+        ({"commit": "pinned-commit"}, "pinned-commit"),
+        ({"branch": "main", "tag": "v1.1.0"}, "v1.1.0"),
+        ({"branch": "main", "commit": "pinned-commit"}, "pinned-commit"),
+    ],
+)
+def test_git_repository_charts_are_cloned_at_flux_ref(chart_repo, tmp_path, git_ref, expected_tag):
+    repo, commits = chart_repo
+    if git_ref and "commit" in git_ref:
+        git_ref = {**git_ref, "commit": commits[git_ref["commit"]]}
+
+    code, rows, err = run([str(git_release_checkout(tmp_path, repo, git_ref))])
+
+    assert code == 0, err
+    assert [row["image"] for row in rows] == [f"ghcr.io/stefanprodan/podinfo:{expected_tag}"]

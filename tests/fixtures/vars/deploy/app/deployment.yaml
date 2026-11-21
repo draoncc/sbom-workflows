@@ -18,3 +18,5 @@ spec:
           image: ${REGISTRY}/app:${TAG}
         - name: proxy
           image: ${PROXY_REGISTRY:=docker.io/org}/proxy:${PROXY_TAG:=1.0}
+        - name: escaped
+          image: ghcr.io/org/escaped:$${TAG}
