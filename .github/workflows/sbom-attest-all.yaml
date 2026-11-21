@@ -6,6 +6,10 @@ name: SBOM attest all
 on:
   workflow_call:
     inputs:
+      images:
+        description: Newline-separated Image names under the owner (e.g. foo, foo/api), each linked to the calling repo; defaults to the repo name
+        type: string
+        default: ""
       include-untagged:
         description: Also attest untagged image versions
         type: boolean
@@ -57,6 +61,7 @@ jobs:
           GH_TOKEN: ${{ secrets.token || github.token }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.repository }}
+          IMAGES: ${{ inputs.images }}
           INCLUDE_UNTAGGED: ${{ inputs.include-untagged }}
           MAX_DIGESTS: ${{ inputs.max-digests }}
           DRY_RUN: ${{ inputs.dry-run }}
@@ -116,10 +121,39 @@ jobs:
             else empty end'
 
           subjects="$(mktemp)"
-          package_list="$(gh api --paginate "$base/packages?package_type=container" \
-            --jq '.[] | select(.repository.full_name == $ENV.REPO) | .name')"
+          # GITHUB_TOKEN cannot list packages, only look them up by name
+          # (docs/adr/0001-name-images-explicitly.md). Named Images must exist
+          # and be linked to $REPO; the default name may be absent.
+          explicit=false; names="${REPO#*/}"
+          if [[ "$IMAGES" =~ [^[:space:]] ]]; then explicit=true; names="$IMAGES"; fi
           packages=()
-          [ -n "$package_list" ] && mapfile -t packages <<< "$package_list"
+          while read -r name; do
+            [ -z "$name" ] && continue
+            name="${name,,}"
+            case "$name" in
+              ghcr.io/*|*:*|*@*)
+                echo "::error::images entry '$name' must be a name under $owner_lc, not a reference"
+                exit 1 ;;
+            esac
+            problem=""
+            if linked="$(gh api "$base/packages/container/${name//\//%2F}" \
+              --jq '.repository.full_name // ""' 2>"$err" </dev/null)"; then
+              [ "${linked,,}" = "${REPO,,}" ] || problem="is linked to '${linked:-no repository}', not $REPO"
+            elif grep -qE 'HTTP (403|404)' "$err"; then
+              problem="is not accessible: $(tr '\n' ' ' < "$err")"
+            else
+              cat "$err" >&2
+              exit 1
+            fi
+            if [ -z "$problem" ]; then
+              packages+=("$name")
+            elif [ "$explicit" = true ]; then
+              echo "::error::image ghcr.io/$owner_lc/$name $problem"
+              exit 1
+            else
+              echo "::warning::image ghcr.io/$owner_lc/$name $problem; skipping"
+            fi
+          done <<< "$names"
           echo "Found ${#packages[@]} image(s) linked to $REPO"
 
           for pkg in "${packages[@]}"; do
