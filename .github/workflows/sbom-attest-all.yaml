@@ -65,7 +65,13 @@ jobs:
 
           owner_lc="${OWNER,,}"
           limit=$(( MAX_DIGESTS < 256 ? MAX_DIGESTS : 256 )) # matrix job limit
-          owner_type="$(gh api "users/$OWNER" --jq .type)"
+
+          # gh prints only the API message on failure; name the request too.
+          gh_api() {
+            gh api "$@" || { echo "::error::gh api $* failed" >&2; return 1; }
+          }
+
+          owner_type="$(gh_api "users/$OWNER" --jq .type)"
           case "$owner_type" in
             Organization) base="orgs/$OWNER" ;;
             *) base="users/$OWNER" ;;
@@ -83,6 +89,7 @@ jobs:
                 [ "$n" -gt 0 ] && return 0
               elif ! grep -q 'HTTP 404' "$err"; then
                 cat "$err" >&2
+                echo "::error::gh api repos/$REPO/attestations/$digest predicate_type=$pt failed" >&2
                 exit 1
               fi
             done
@@ -116,7 +123,7 @@ jobs:
             else empty end'
 
           subjects="$(mktemp)"
-          package_list="$(gh api --paginate "$base/packages?package_type=container" \
+          package_list="$(gh_api --paginate "$base/packages?package_type=container" \
             --jq '.[] | select(.repository.full_name == $ENV.REPO) | .name')"
           packages=()
           [ -n "$package_list" ] && mapfile -t packages <<< "$package_list"
@@ -132,7 +139,7 @@ jobs:
               continue
             fi
 
-            gh api --paginate "$base/packages/container/${pkg//\//%2F}/versions" \
+            gh_api --paginate "$base/packages/container/${pkg//\//%2F}/versions" \
               --jq '.[] | [.name, (.metadata.container.tags | length > 0)] | @tsv' |
             while IFS=$'\t' read -r digest tagged; do
               if [ "$tagged" != true ] && [ "$INCLUDE_UNTAGGED" != true ]; then continue; fi
