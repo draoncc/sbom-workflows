@@ -52,3 +52,35 @@ Secret `token` (optional) overrides `GITHUB_TOKEN` for packages and registry acc
 gh attestation verify oci://ghcr.io/<owner>/<image>@<digest> --repo <owner>/<repo> \
   --predicate-type https://cyclonedx.org/bom
 ```
+
+## Flux image map
+
+Reusable workflow that renders a repository's Flux roots and prints every deployed Image with its Controller and Workload as a table, in the job log and step summary.
+
+```yaml
+jobs:
+  images:
+    permissions:
+      contents: read
+      packages: read
+    uses: draoncc/sbom-workflows/.github/workflows/flux-image-map.yaml@main # pin to a commit SHA
+    with:
+      root: |
+        clusters/prod
+      vars: |
+        REGISTRY=ghcr.io/org
+```
+
+The caller must grant at least the permissions above. Set `root` to the Flux bootstrap path(s): the default `.` renders the whole repository as Flux would a Kustomization with `path: ./`.
+
+### Inputs
+
+| Input | Default | Description |
+| --- | --- | --- |
+| `root` | `.` | Flux roots to render, one path per line, relative to the repository root |
+| `vars` | `''` | Substitution variables, one `KEY=VALUE` per line |
+| `kube-version` | `''` | Kubernetes version passed to `helm template` |
+| `resolve-digests` | `false` | Add a digest column, looked up in each Image's registry |
+| `strict` | `false` | Fail on any fallback or warning |
+
+Secret `token` (optional) overrides `GITHUB_TOKEN` for ghcr.io access when resolving digests.
