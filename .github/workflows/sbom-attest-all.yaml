@@ -35,6 +35,11 @@ on:
         description: JSON array of {image, digest, spdx, cyclonedx} for subject digests scheduled this run (capped at max-digests)
         value: ${{ jobs.discover.outputs.matrix }}
 
+# Overlapping runs would discover and attest the same subjects twice.
+concurrency:
+  group: sbom-attest-all-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   discover:
     runs-on: ubuntu-latest
