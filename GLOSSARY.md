@@ -5,8 +5,12 @@ Reusable automation that ensures every container image a repository publishes ca
 ## Language
 
 **Image**:
-A container package in a registry, owned by a user or org and linked to a source repository.
+A container package in a registry, owned by a user or org and linked to one Linked repository.
 _Avoid_: Container, package (when meaning the image itself)
+
+**Linked repository**:
+The repository an Image is linked to; SBOM attestations for its Platform manifests are stored there.
+_Avoid_: Source repo, owning repo
 
 **Image version**:
 One digest-addressed entry of an Image; tagged or untagged.
