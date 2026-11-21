@@ -24,6 +24,7 @@ jobs:
       artifact-metadata: write
     uses: draoncc/sbom-workflows/.github/workflows/sbom-attest-all.yaml@main # pin to a commit SHA
     with:
+      images: my-image other-image # GHCR package names; required with GITHUB_TOKEN
       include-untagged: false
       dry-run: false
 ```
@@ -34,6 +35,7 @@ The caller must grant at least the permissions above; a reusable workflow cannot
 
 | Input | Default | Description |
 | --- | --- | --- |
+| `images` | `''` | Whitespace-separated GHCR package names to attest. Empty discovers all packages linked to the repository, which needs a `token` with `read:packages`: `GITHUB_TOKEN` cannot list an owner's packages |
 | `include-untagged` | `false` | Also attest untagged image versions |
 | `dry-run` | `false` | Only report missing attestations in the job summary |
 | `max-digests` | `256` | Max subject digests attested per run (capped at 256); the rest wait for the next run |

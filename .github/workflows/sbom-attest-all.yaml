@@ -6,6 +6,10 @@ name: SBOM attest all
 on:
   workflow_call:
     inputs:
+      images:
+        description: Whitespace-separated GHCR package names to attest; skips package discovery, which GITHUB_TOKEN cannot do
+        type: string
+        default: ''
       include-untagged:
         description: Also attest untagged image versions
         type: boolean
@@ -57,6 +61,7 @@ jobs:
           GH_TOKEN: ${{ secrets.token || github.token }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.repository }}
+          IMAGES: ${{ inputs.images }}
           INCLUDE_UNTAGGED: ${{ inputs.include-untagged }}
           MAX_DIGESTS: ${{ inputs.max-digests }}
           DRY_RUN: ${{ inputs.dry-run }}
@@ -123,11 +128,21 @@ jobs:
             else empty end'
 
           subjects="$(mktemp)"
-          package_list="$(gh_api --paginate "$base/packages?package_type=container" \
-            --jq '.[] | select(.repository.full_name == $ENV.REPO) | .name')"
           packages=()
-          [ -n "$package_list" ] && mapfile -t packages <<< "$package_list"
-          echo "Found ${#packages[@]} image(s) linked to $REPO"
+          if [ -n "$IMAGES" ]; then
+            read -ra packages -d '' <<< "$IMAGES" || true # -d '': span newlines
+            echo "Using ${#packages[@]} image(s) from the images input"
+          else
+            # Listing an owner's packages is not repository-scoped, so
+            # GITHUB_TOKEN gets HTTP 400 here.
+            if ! package_list="$(gh_api --paginate "$base/packages?package_type=container" \
+              --jq '.[] | select(.repository.full_name == $ENV.REPO) | .name')"; then
+              echo "::error::cannot list packages of $OWNER; set the images input or pass a token secret with read:packages" >&2
+              exit 1
+            fi
+            [ -n "$package_list" ] && mapfile -t packages <<< "$package_list"
+            echo "Found ${#packages[@]} image(s) linked to $REPO"
+          fi
 
           for pkg in "${packages[@]}"; do
             image="ghcr.io/$owner_lc/$pkg"
